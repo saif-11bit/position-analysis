@@ -70,39 +70,13 @@ class InternshipRequirement:
     technical_stack: Dict[str, Dict[str, Any]]
 
 @dataclass
-class CategorySkillMatch:
-    """Represents matched skills within a category, organized by parent-child hierarchy"""
-    category_name: str
-    parent_skill_groups: Dict[str, List[str]]  # parent_name -> list of matched children
-    standalone_skills: List[str]  # skills without parents or parents without children
-    
-    def get_display_string(self) -> str:
-        """Format the category skills for display"""
-        display_parts = []
-        
-        # Add parent skill groups
-        for parent, children in self.parent_skill_groups.items():
-            if len(children) == 1 and children[0].lower() == parent.lower():
-                # Parent skill matched but no separate children
-                display_parts.append(parent)
-            else:
-                # Parent with children
-                children_str = ", ".join(children)
-                display_parts.append(f"{parent} (→ {children_str})")
-        
-        # Add standalone skills
-        display_parts.extend(self.standalone_skills)
-        
-        return ", ".join(display_parts)
-
-@dataclass
 class MatchResult:
     student: Student
     score: float
     stack_pass: bool
     stack_coverage_score: float
     education_match_score: float
-    matched_skills_by_category: List[CategorySkillMatch]  # Updated to use CategorySkillMatch
+    matched_skills: List[str]
     missing_skills: List[str]
     overall_reasoning: str
     stack_details: Dict[str, Dict[str, Any]]
@@ -113,13 +87,22 @@ class SimplifiedInternshipMatcher:
         self.openai_api_key = openai_api_key
         self.use_llm = use_llm
         
-        # Load skill hierarchy
-        self.skills_data = self.load_skills("skill_taxonomy_565_skills.json")
-        self.child_to_parent_map = self.build_child_to_parent(self.skills_data)
-        
         # Synonyms / expansions to normalize skills
         self.skill_synonyms = {
-            # Keep your existing synonyms here if needed
+            # 'javascript': ['js', 'node.js', 'nodejs', 'react', 'angular', 'vue'],
+            # 'python': ['django', 'flask', 'fastapi', 'pandas', 'numpy', 'scikit-learn', 'sklearn'],
+            # 'r': ['r language'],
+            # 'java': ['spring', 'hibernate', 'maven', 'gradle'],
+            # 'machine learning': ['ml', 'deep learning', 'neural networks', 'tensorflow', 'pytorch', 'ai'],
+            # 'tensorflow': ['tf'],
+            # 'pytorch': ['torch'],
+            # 'database': ['sql', 'mysql', 'postgresql', 'mongodb', 'nosql'],
+            # 'sql': ['postgres', 'postgresql', 'mysql', 'mariadb', 'sqlite'],
+            # 'nosql': ['mongodb', 'dynamodb', 'cassandra', 'couchdb'],
+            # 'cloud': ['aws', 'azure', 'gcp', 'docker', 'kubernetes'],
+            # 'frontend': ['html', 'css', 'react', 'angular', 'vue', 'javascript'],
+            # 'backend': ['api', 'server', 'microservices', 'fastapi', 'django', 'flask'],
+            # 'jupyter notebook': ['jupyter', 'ipynb', 'notebook']
         }
 
         # Education matching keywords
@@ -133,170 +116,6 @@ class SimplifiedInternshipMatcher:
             'design': ['design', 'arts', 'graphic design', 'visual arts', 'fine arts'],
             'data science': ['data science', 'statistics', 'mathematics', 'analytics']
         }
-
-    def _norm(self, s: str) -> str:
-        return s.strip().lower()
-
-    def load_skills(self, path: str) -> List[dict]:
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except FileNotFoundError:
-            st.warning(f"Skill taxonomy file '{path}' not found. Skill hierarchy features will be disabled.")
-            return []
-        except Exception as e:
-            st.warning(f"Error loading skill taxonomy: {e}. Skill hierarchy features will be disabled.")
-            return []
-
-    def build_child_to_parent(self, skills: List[dict]) -> Dict[str, dict]:
-        """
-        Builds a mapping from child label/name/alias -> parent skill object.
-        Uses both:
-          1) child's hierarchy.parent (id or name/alias), and
-          2) parent's hierarchy.children (string labels).
-        Also honors aliases for both child and parent.
-        """
-        if not skills:
-            return {}
-            
-        by_id: Dict[str, dict] = {}
-        by_name: Dict[str, dict] = {}
-        by_alias: Dict[str, dict] = {}
-
-        for sk in skills:
-            if sk.get("id"):
-                by_id[sk["id"]] = sk
-            if sk.get("name"):
-                by_name[self._norm(sk["name"])] = sk
-            for a in (sk.get("aliases") or []):
-                by_alias[self._norm(a)] = sk
-
-        child_to_parent: Dict[str, dict] = {}
-
-        # Pass 1: child's explicit hierarchy.parent (could be id or name/alias)
-        for sk in skills:
-            parent_ref = (sk.get("hierarchy") or {}).get("parent")
-            if not parent_ref:
-                continue
-            parent = None
-            if isinstance(parent_ref, str):
-                parent = by_id.get(parent_ref) or by_name.get(self._norm(parent_ref)) or by_alias.get(self._norm(parent_ref))
-            if parent:
-                # map child's name + aliases to parent
-                child_to_parent[self._norm(sk["name"])] = parent
-                for a in (sk.get("aliases") or []):
-                    child_to_parent[self._norm(a)] = parent
-
-        # Pass 2: parent's hierarchy.children (usually string labels)
-        # for parent in skills:
-        #     children = (parent.get("hierarchy") or {}).get("children") or []
-        #     for child_label in children:
-        #         if not isinstance(child_label, str):
-        #             continue
-        #         nlabel = self._norm(child_label)
-        #         # map the label directly
-        #         child_to_parent[nlabel] = parent
-        #         # if that label corresponds to a concrete skill (name/alias), map those too
-        #         child_skill = by_name.get(nlabel) or by_alias.get(nlabel)
-        #         if child_skill:
-        #             child_to_parent[self._norm(child_skill["name"])] = parent
-        #             for a in (child_skill.get("aliases") or []):
-        #                 child_to_parent[self._norm(a)] = parent
-
-        return child_to_parent
-
-    def get_skill_hierarchy_info(self, skill_name: str) -> Tuple[str, bool, List[str]]:
-        """
-        Returns tuple of (parent_name, is_parent_skill, children_list)
-        """
-        skill_lower = self._norm(skill_name)
-        parent_skill = self.child_to_parent_map.get(skill_lower)
-        parent_name = parent_skill.get("name", "") if parent_skill else ""
-        
-        # Check if this skill is itself a parent
-        is_parent = False
-        children = []
-        for skill_data in self.skills_data:
-            if self._norm(skill_data.get("name", "")) == skill_lower:
-                hierarchy = skill_data.get("hierarchy", {})
-                children = hierarchy.get("children", [])
-                is_parent = len(children) > 0
-                break
-        
-        return parent_name, is_parent, children
-
-    def create_category_skill_matches(self, matched_skills_by_category: Dict[str, List[str]]) -> List[CategorySkillMatch]:
-        """
-        Convert category-based matched skills to CategorySkillMatch objects with proper hierarchy grouping
-        """
-        category_matches = []
-        
-        for category_name, matched_skills in matched_skills_by_category.items():
-            if not matched_skills:
-                continue
-                
-            parent_skill_groups = {}  # parent_name -> list of children
-            standalone_skills = []
-            processed_skills = set()
-            
-            # First pass: identify all parent skills that have matched children
-            for skill_name in matched_skills:
-                if skill_name in processed_skills:
-                    continue
-                    
-                parent_name, is_parent, children = self.get_skill_hierarchy_info(skill_name)
-                
-                # If this skill has a parent, group it under the parent
-                if parent_name:
-                    if parent_name not in parent_skill_groups:
-                        parent_skill_groups[parent_name] = []
-                    parent_skill_groups[parent_name].append(skill_name)
-                    processed_skills.add(skill_name)
-                # If this skill is a parent itself, check for children in matched skills
-                elif is_parent:
-                    children_in_matched = [child for child in children if child in matched_skills]
-                    if children_in_matched:
-                        # Parent with matched children
-                        parent_skill_groups[skill_name] = children_in_matched
-                        processed_skills.add(skill_name)
-                        for child in children_in_matched:
-                            processed_skills.add(child)
-                    else:
-                        # Parent without matched children - treat as standalone
-                        standalone_skills.append(skill_name)
-                        processed_skills.add(skill_name)
-                else:
-                    # Standalone skill (no parent, not a parent)
-                    standalone_skills.append(skill_name)
-                    processed_skills.add(skill_name)
-            
-            # Second pass: handle any remaining skills that weren't processed
-            for skill_name in matched_skills:
-                if skill_name not in processed_skills:
-                    standalone_skills.append(skill_name)
-            
-            category_match = CategorySkillMatch(
-                category_name=category_name,
-                parent_skill_groups=parent_skill_groups,
-                standalone_skills=standalone_skills
-            )
-            
-            category_matches.append(category_match)
-        
-        return category_matches
-
-    def format_categorized_skills_display(self, category_matches: List[CategorySkillMatch]) -> str:
-        """Format categorized skill matches for display"""
-        if not category_matches:
-            return ""
-        
-        display_parts = []
-        for category_match in category_matches:
-            category_display = category_match.get_display_string()
-            if category_display:
-                display_parts.append(f"**{category_match.category_name}**: {category_display}")
-        
-        return " | ".join(display_parts)
 
     def normalize_skills(self, skills: List[str]) -> List[str]:
         normalized = set()
@@ -429,21 +248,20 @@ class SimplifiedInternshipMatcher:
         technical_stack: Dict[str, Dict[str, Any]],
         use_llm: bool = False,
         openai_api_key: str = None
-    ) -> Tuple[bool, float, Dict[str, Dict[str, Any]], Dict[str, List[str]], List[str]]:
+    ) -> Tuple[bool, float, Dict[str, Dict[str, Any]], List[str], List[str]]:
         """
-        Enhanced technical stack checking with categorized skill matching
-        Returns matched_skills_by_category instead of flat skill list
+        Enhanced technical stack checking with optional LLM skill matching
         """
         details = {}
-        matched_skills_by_category = {}
+        all_matched = []
         all_missing = []
 
         if not technical_stack:
-            return True, 1.0, {}, {}, []
+            return True, 1.0, {}, [], []
 
         categories = list(technical_stack.keys())
         if not categories:
-            return True, 1.0, {}, {}, []
+            return True, 1.0, {}, [], []
 
         passed = True
         category_scores = []
@@ -461,10 +279,6 @@ class SimplifiedInternshipMatcher:
             # Combine actual matches and LLM matches for display
             all_category_matches = actual_matched + llm_matched
             total_matches = len(actual_matched) + len(llm_matched)
-            
-            # Store matched skills by category
-            if all_category_matches:
-                matched_skills_by_category[category] = all_category_matches
             
             met = total_matches >= min_match
             
@@ -486,12 +300,12 @@ class SimplifiedInternshipMatcher:
             category_score = min(total_matches, min_match) / denom
             category_scores.append(category_score)
 
+            all_matched.extend(all_category_matches)
             if not met:
                 all_missing.extend([f"{category}: {m}" for m in missing_reqs])
 
         coverage_score = sum(category_scores) / len(category_scores) if category_scores else 1.0
-        
-        return passed, coverage_score, details, matched_skills_by_category, all_missing
+        return passed, coverage_score, details, all_matched, all_missing
 
     def calculate_education_match_score(self, student_education: str, student_degree: str, relevant_degrees: List[str]) -> float:
         if not relevant_degrees:
@@ -571,9 +385,22 @@ class SimplifiedInternshipMatcher:
 
     def match_student_to_internship(self, student: Student, internship_req: InternshipRequirement) -> MatchResult:
         # 1) Technical Stack Gate + Coverage (with optional LLM enhancement)
-        stack_pass, stack_cov, stack_details, matched_skills_by_category, flat_missing = self.check_technical_stack(
+        stack_pass, stack_cov, stack_details, flat_matched, flat_missing = self.check_technical_stack(
             student.skills, internship_req.technical_stack, self.use_llm, self.openai_api_key
         )
+
+        # if not stack_pass:
+        #     return MatchResult(
+        #         student=student,
+        #         score=0.0,
+        #         stack_pass=False,
+        #         stack_coverage_score=stack_cov,
+        #         education_match_score=0.0,
+        #         matched_skills=flat_matched,
+        #         missing_skills=flat_missing,
+        #         overall_reasoning="Failed mandatory technical stack requirements.",
+        #         stack_details=stack_details
+        #     )
 
         # 2) Education
         education_score = self.calculate_education_match_score(
@@ -597,16 +424,13 @@ class SimplifiedInternshipMatcher:
             student, internship_req, stack_pass, stack_cov, education_score, stack_details
         )
 
-        # Convert to CategorySkillMatch objects
-        category_skill_matches = self.create_category_skill_matches(matched_skills_by_category)
-
         return MatchResult(
             student=student,
             score=overall_score,
             stack_pass=True,
             stack_coverage_score=stack_cov,
             education_match_score=education_score,
-            matched_skills_by_category=category_skill_matches,
+            matched_skills=flat_matched,
             missing_skills=flat_missing,
             overall_reasoning=reasoning,
             stack_details=stack_details
@@ -617,6 +441,7 @@ def extract_text_from_html(html_str):
     if not html_str or not isinstance(html_str, str):
         return ""
     return BeautifulSoup(html_str, "html.parser").get_text(separator=" ").strip()
+
 
 def _norm(s: str) -> str:
     return s.strip().lower()
@@ -662,22 +487,23 @@ def build_child_to_parent(skills: List[dict]) -> Dict[str, dict]:
                 child_to_parent[_norm(a)] = parent
 
     # Pass 2: parent's hierarchy.children (usually string labels)
-    # for parent in skills:
-    #     children = (parent.get("hierarchy") or {}).get("children") or []
-    #     for child_label in children:
-    #         if not isinstance(child_label, str):
-    #             continue
-    #         nlabel = _norm(child_label)
-    #         # map the label directly
-    #         child_to_parent[nlabel] = parent
-    #         # if that label corresponds to a concrete skill (name/alias), map those too
-    #         child_skill = by_name.get(nlabel) or by_alias.get(nlabel)
-    #         if child_skill:
-    #             child_to_parent[_norm(child_skill["name"])] = parent
-    #             for a in (child_skill.get("aliases") or []):
-    #                 child_to_parent[_norm(a)] = parent
+    for parent in skills:
+        children = (parent.get("hierarchy") or {}).get("children") or []
+        for child_label in children:
+            if not isinstance(child_label, str):
+                continue
+            nlabel = _norm(child_label)
+            # map the label directly
+            child_to_parent[nlabel] = parent
+            # if that label corresponds to a concrete skill (name/alias), map those too
+            child_skill = by_name.get(nlabel) or by_alias.get(nlabel)
+            if child_skill:
+                child_to_parent[_norm(child_skill["name"])] = parent
+                for a in (child_skill.get("aliases") or []):
+                    child_to_parent[_norm(a)] = parent
 
     return child_to_parent
+
 
 def parent_names_for_children(
     skills_json_path: str,
@@ -688,16 +514,14 @@ def parent_names_for_children(
     Returns a list of parent skill NAMES aligned with child_names.
     If no parent found (root or unknown), returns empty_return (default "") for that position.
     """
-    try:
-        skills = load_skills(skills_json_path)
-        child_to_parent = build_child_to_parent(skills)
-        result: List[str] = []
-        for raw in child_names:
-            parent = child_to_parent.get(_norm(raw))
-            result.append(parent.get("name") if parent else empty_return)
-        return result
-    except:
-        return [""] * len(child_names)
+    skills = load_skills(skills_json_path)
+    child_to_parent = build_child_to_parent(skills)
+    result: List[str] = []
+    for raw in child_names:
+        parent = child_to_parent.get(_norm(raw))
+        result.append(parent.get("name") if parent else empty_return)
+    return result
+
 
 def parse_student_csv(file_obj):
     df = pd.read_csv(file_obj)
@@ -767,8 +591,8 @@ def parse_student_csv(file_obj):
     return students
 
 # ---- Streamlit App ----
-st.set_page_config(page_title="Enhanced Student-Job Matcher", layout="wide")
-st.title("🎓 Enhanced Student-Job Matching (Categorized Skill Hierarchy)")
+st.set_page_config(page_title="Simplified Student-Job Matcher", layout="wide")
+st.title("🎓 Simplified Student-Job Matching (Technical Stack + Education Only)")
 
 # Sidebar - CSV Upload
 st.sidebar.header("Step 1: Upload Student CSV")
@@ -1032,6 +856,8 @@ default_roles = [
             }
         }
     },
+
+
     {
         "job_title": "Next.js Intern",
         "relevant_degrees": "Computer Science, Software Engineering, Information Technology, Web Development",
@@ -1213,7 +1039,6 @@ if use_llm:
     if not openai_api_key:
         st.sidebar.warning("Please provide your OpenAI API key to use AI-enhanced skill matching.")
         use_llm = False
-
 job_roles: List[InternshipRequirement] = []
 for role in simplified_roles:
     if role.get("job_title"):
@@ -1262,7 +1087,7 @@ ready_to_run = (
 )
 
 if ready_to_run:
-    st.header("Matching Results (Categorized Skill Hierarchy)")
+    st.header("Matching Results (Technical Stack + Education)")
 
     # Use cached compute when available
     if st.session_state["simp_matrix_rows"] is None or st.session_state["simp_all_matches"] is None:
@@ -1290,9 +1115,7 @@ if ready_to_run:
                     unmet_cats = [c for c, d in result.stack_details.items() if not d.get("met")]
                     row[f"{role.job_title} - Unmet Stack Categories"] = ", ".join(unmet_cats) if unmet_cats else ""
 
-                    # Format matched skills with categorized hierarchy
-                    matched_skills_display = matcher.format_categorized_skills_display(result.matched_skills_by_category)
-                    row[f"{role.job_title} - Matched Skills"] = matched_skills_display
+                    row[f"{role.job_title} - Matched Skills"] = ", ".join(result.matched_skills)
                     row[f"{role.job_title} - Missing Skills"] = ", ".join(result.missing_skills[:10])  # Limit display
                     row[f"{role.job_title} - Reasoning"] = result.overall_reasoning
 
@@ -1366,34 +1189,6 @@ if ready_to_run:
             with c2: st.metric("Stack Coverage", f"{result.stack_coverage_score:.3f}")
             with c3: st.metric("Education Match", f"{result.education_match_score:.3f}")
 
-            # Enhanced categorized skills display with hierarchy
-            st.write("**🎯 Matched Skills by Category with Hierarchy:**")
-            if result.matched_skills_by_category:
-                for category_match in result.matched_skills_by_category:
-                    st.success(f"**📂 {category_match.category_name}:** {category_match.get_display_string()}")
-                
-                # Show detailed hierarchy breakdown
-                with st.expander("📊 Detailed Category & Skill Hierarchy Breakdown"):
-                    for category_match in result.matched_skills_by_category:
-                        st.write(f"**📂 Category: {category_match.category_name}**")
-                        
-                        # Show parent-child groups
-                        for parent, children in category_match.parent_skill_groups.items():
-                            if len(children) == 1 and children[0].lower() == parent.lower():
-                                st.write(f"   ⭐ **Parent Skill:** {parent}")
-                            else:
-                                st.write(f"   🌳 **Parent Skill:** {parent}")
-                                for child in children:
-                                    st.write(f"      └── 🌱 Child: {child}")
-                        
-                        # Show standalone skills
-                        for skill in category_match.standalone_skills:
-                            st.write(f"   ⭐ **Standalone Skill:** {skill}")
-                        
-                        st.write("")  # Empty line for separation
-            else:
-                st.warning("No skills matched for this role.")
-
             # Technical stack breakdown
             st.write("**Technical Stack Breakdown:**")
             for cat, d in result.stack_details.items():
@@ -1414,7 +1209,7 @@ if ready_to_run:
     st.download_button(
         label="📊 Download Results as CSV",
         data=csv_content,
-        file_name=f"enhanced_student_job_matching_{time.strftime('%Y%m%d_%H%M%S')}.csv",
+        file_name=f"simplified_student_job_matching_{time.strftime('%Y%m%d_%H%M%S')}.csv",
         mime="text/csv"
     )
 
@@ -1459,23 +1254,11 @@ with st.expander("📋 Instructions & CSV Format"):
       }
       ```
 
-    **Enhanced Categorized Scoring System:**
+    **Simplified Scoring System:**
     - Technical Stack Coverage: 60%
     - Education Match: 40%
     - **Optional AI Enhancement**: Enable to find transferable skills (e.g., MySQL experience satisfying SQL requirement)
     - If any mandatory stack category fails → Overall score = 0
-    
-    **🌳 Enhanced Categorized Skill Hierarchy Display:**
-    - **By Category First**: Skills grouped by technical stack categories (Programming Language, Frameworks, etc.)
-    - **Parent Skills** with children shown as: `Python (→ Django, Flask)`
-    - **Standalone Skills** displayed normally within their category
-    - **Detailed Breakdown**: Expandable view showing complete category and hierarchy structure
-    - **Duplicate Prevention**: Multiple skills from same parent grouped together under single parent entry
-    
-    **Example Display:**
-    - **Programming Language**: Python
-    - **Frameworks**: Python (→ Django, Flask) 
-    - **Databases**: MySQL, PostgreSQL
     
     **AI-Enhanced Skill Matching:**
     When enabled, the system uses AI to identify:
@@ -1486,4 +1269,4 @@ with st.expander("📋 Instructions & CSV Format"):
     """)
 
 st.markdown("---")
-st.caption("Enhanced Student-Job Matcher with Categorized Skill Hierarchy 🚀 🌳 📂")
+st.caption("Simplified Technical Stack + Education Matching 🚀")
