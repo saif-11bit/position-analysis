@@ -1239,6 +1239,69 @@ if students_csv:
 st.sidebar.header("Step 2: Define Job Roles")
 
 default_roles = [
+{
+        "job_title": "MERN Stack Intern",
+        "relevant_degrees": "Computer Science, Software Engineering, Information Technology, Web Development",
+        "evaluation_criteria": "Can build full-stack web applications?|0.3,Can create responsive UIs with React?|0.25,Can design RESTful APIs?|0.2,Can work with databases?|0.15,Can implement authentication?|0.1",
+        "technical_stack": {
+            "Frontend": {
+                "options": [
+                    "react",
+                    "javascript",
+                    "html",
+                    "css"
+                ],
+                "mandatory": True,
+                "min_match": 3
+            },
+            "Backend": {
+                "options": [
+                    "nodejs",
+                    "express"
+                ],
+                "mandatory": True,
+                "min_match": 2
+            },
+            "Database": {
+                "options": [
+                    "mongodb",
+                    "mongoose"
+                ],
+                "mandatory": True,
+                "min_match": 1
+            },
+            "State Management": {
+                "options": [
+                    "redux",
+                    "context api",
+                    "zustand"
+                ],
+                "mandatory": True,
+                "min_match": 1
+            },
+            "Styling & UI": {
+                "options": [
+                    "bootstrap",
+                    "tailwind css",
+                    "material-ui",
+                    "styled-components"
+                ],
+                "mandatory": False,
+                "min_match": 1
+            },
+            "Tools & Others (Optional)": {
+                "options": [
+                    "git",
+                    "postman",
+                    "jwt",
+                    "bcrypt",
+                    "cors"
+                ],
+                "mandatory": False,
+                "min_match": 1
+            }
+        }
+    },
     {
         "job_title": "Python Backend Intern",
         "relevant_degrees": "Computer Science, Software Engineering, Information Technology, Data Science",
@@ -1276,16 +1339,6 @@ default_roles = [
                     "unittest",
                     "black",
                     "flake8"
-                ],
-                "mandatory": False,
-                "min_match": 1
-            },
-            "Authentication & Security": {
-                "options": [
-                    "jwt",
-                    "oauth",
-                    "bcrypt",
-                    "django auth"
                 ],
                 "mandatory": False,
                 "min_match": 1
@@ -1419,69 +1472,6 @@ default_roles = [
                     "jenkins",
                     "github actions",
                     "gitlab ci"
-                ],
-                "mandatory": False,
-                "min_match": 1
-            }
-        }
-    },
-    {
-        "job_title": "MERN Stack Intern",
-        "relevant_degrees": "Computer Science, Software Engineering, Information Technology, Web Development",
-        "evaluation_criteria": "Can build full-stack web applications?|0.3,Can create responsive UIs with React?|0.25,Can design RESTful APIs?|0.2,Can work with databases?|0.15,Can implement authentication?|0.1",
-        "technical_stack": {
-            "Frontend": {
-                "options": [
-                    "react",
-                    "javascript",
-                    "html",
-                    "css"
-                ],
-                "mandatory": True,
-                "min_match": 3
-            },
-            "Backend": {
-                "options": [
-                    "nodejs",
-                    "express"
-                ],
-                "mandatory": True,
-                "min_match": 2
-            },
-            "Database": {
-                "options": [
-                    "mongodb",
-                    "mongoose"
-                ],
-                "mandatory": True,
-                "min_match": 1
-            },
-            "State Management": {
-                "options": [
-                    "redux",
-                    "context api",
-                    "zustand"
-                ],
-                "mandatory": True,
-                "min_match": 1
-            },
-            "Styling & UI": {
-                "options": [
-                    "bootstrap",
-                    "tailwind css",
-                    "material-ui",
-                    "styled-components"
-                ],
-                "mandatory": False,
-                "min_match": 1
-            },
-            "Tools & Others (Optional)": {
-                "options": [
-                    "git",
-                    "postman",
-                    "jwt",
-                    "bcrypt",
-                    "cors"
                 ],
                 "mandatory": False,
                 "min_match": 1
