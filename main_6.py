@@ -3,12 +3,11 @@ import pandas as pd
 import ast
 from bs4 import BeautifulSoup
 from dataclasses import dataclass
-from typing import List, Dict, Tuple, Any, Set
+from typing import List, Dict, Tuple, Any
 import re
 import time
 import json
 import hashlib
-from collections import defaultdict
 
 def compute_config_fingerprint(students, job_roles) -> str:
     """Stable hash of inputs to detect changes."""
@@ -71,81 +70,30 @@ class InternshipRequirement:
     technical_stack: Dict[str, Dict[str, Any]]
 
 @dataclass
-class HierarchyNode:
-    """Represents a node in the skill hierarchy tree"""
-    skill_name: str
-    children: List['HierarchyNode']
-    is_matched: bool = False
-    
-    def __post_init__(self):
-        if self.children is None:
-            self.children = []
-
-@dataclass
 class CategorySkillMatch:
-    """Represents matched skills within a category, organized by unified hierarchy trees"""
+    """Represents matched skills within a category, organized by parent-child hierarchy"""
     category_name: str
-    hierarchy_trees: List[HierarchyNode]  # List of root nodes representing complete trees
-    standalone_skills: List[str]  # Skills without any hierarchy
+    parent_skill_groups: Dict[str, List[str]]  # parent_name -> list of matched children
+    standalone_skills: List[str]  # skills without parents or parents without children
     
     def get_display_string(self) -> str:
-        """Format the category skills for display with unified hierarchy"""
+        """Format the category skills for display"""
         display_parts = []
         
-        # Add hierarchy trees
-        for tree in self.hierarchy_trees:
-            tree_display = self._format_tree_display(tree)
-            if tree_display:
-                display_parts.append(tree_display)
+        # Add parent skill groups
+        for parent, children in self.parent_skill_groups.items():
+            if len(children) == 1 and children[0].lower() == parent.lower():
+                # Parent skill matched but no separate children
+                display_parts.append(parent)
+            else:
+                # Parent with children
+                children_str = ", ".join(children)
+                display_parts.append(f"{parent} (→ {children_str})")
         
         # Add standalone skills
         display_parts.extend(self.standalone_skills)
         
         return ", ".join(display_parts)
-    
-    def _format_tree_display(self, node: HierarchyNode, depth: int = 0) -> str:
-        """Format a single tree node and its children for display"""
-        if depth == 0:
-            # Root level - show the full tree structure
-            parts = []
-            if node.is_matched:
-                parts.append(f"**{node.skill_name}**")
-            else:
-                parts.append(node.skill_name)
-            
-            if node.children:
-                child_parts = []
-                for child in node.children:
-                    child_display = self._format_tree_display(child, depth + 1)
-                    if child_display:
-                        child_parts.append(child_display)
-                
-                if child_parts:
-                    parts.append(f"({' → '.join(child_parts)})")
-            
-            return ''.join(parts)
-        else:
-            # Child level - show matched children
-            if node.is_matched:
-                result = f"**{node.skill_name}**"
-            else:
-                result = node.skill_name
-            
-            if node.children:
-                matched_children = [self._format_tree_display(child, depth + 1) for child in node.children]
-                matched_children = [c for c in matched_children if c]  # Filter empty
-                if matched_children:
-                    result += f" → {' → '.join(matched_children)}"
-            
-            return result if node.is_matched or any(child.is_matched for child in self._get_all_descendants(node)) else ""
-    
-    def _get_all_descendants(self, node: HierarchyNode) -> List[HierarchyNode]:
-        """Get all descendant nodes recursively"""
-        descendants = []
-        for child in node.children:
-            descendants.append(child)
-            descendants.extend(self._get_all_descendants(child))
-        return descendants
 
 @dataclass
 class MatchResult:
@@ -154,7 +102,7 @@ class MatchResult:
     stack_pass: bool
     stack_coverage_score: float
     education_match_score: float
-    matched_skills_by_category: List[CategorySkillMatch]
+    matched_skills_by_category: List[CategorySkillMatch]  # Updated to use CategorySkillMatch
     missing_skills: List[str]
     overall_reasoning: str
     stack_details: Dict[str, Dict[str, Any]]
@@ -171,9 +119,6 @@ class SimplifiedInternshipMatcher:
         
         # Build comprehensive skill normalization maps from taxonomy
         self.skill_to_canonical = self.build_skill_normalization_maps()
-        
-        # Build skill hierarchy lookup for efficient tree building
-        self.skill_hierarchy_lookup = self.build_skill_hierarchy_lookup()
         
         # Education matching keywords
         self.education_keywords = {
@@ -202,7 +147,10 @@ class SimplifiedInternshipMatcher:
             return []
 
     def build_skill_normalization_maps(self) -> Dict[str, str]:
-        """Build comprehensive skill normalization mapping from the taxonomy."""
+        """
+        Build comprehensive skill normalization mapping from the taxonomy.
+        Maps all variations (name + aliases) to canonical skill names.
+        """
         skill_to_canonical = {}
         
         if not self.skills_data:
@@ -228,7 +176,13 @@ class SimplifiedInternshipMatcher:
         return skill_to_canonical
 
     def build_child_to_parent(self, skills: List[dict]) -> Dict[str, dict]:
-        """Builds a mapping from child label/name/alias -> parent skill object."""
+        """
+        Builds a mapping from child label/name/alias -> parent skill object.
+        Uses both:
+          1) child's hierarchy.parent (id or name/alias), and
+          2) parent's hierarchy.children (string labels).
+        Also honors aliases for both child and parent.
+        """
         if not skills:
             return {}
             
@@ -262,225 +216,79 @@ class SimplifiedInternshipMatcher:
 
         return child_to_parent
 
-    def build_skill_hierarchy_lookup(self) -> Dict[str, Dict]:
-        """Build a lookup table for efficient hierarchy traversal"""
-        hierarchy_lookup = {}
-        
-        if not self.skills_data:
-            return hierarchy_lookup
-        
-        # First pass: Create entries for all skills (names and aliases)
-        for skill in self.skills_data:
-            name = skill.get("name", "")
-            if name:
-                name_norm = self._norm(name)
-                hierarchy_lookup[name_norm] = {
-                    'skill': skill,
-                    'parent': None,
-                    'children': [],
-                    'canonical_name': name
-                }
-                
-                # Also add aliases to the lookup
-                aliases = skill.get("aliases", []) or []
-                for alias in aliases:
-                    if alias and isinstance(alias, str):
-                        alias_norm = self._norm(alias)
-                        hierarchy_lookup[alias_norm] = {
-                            'skill': skill,
-                            'parent': None,
-                            'children': [],
-                            'canonical_name': name  # Point to canonical name
-                        }
-        
-        # Second pass: Build parent-child relationships
-        for skill in self.skills_data:
-            name = skill.get("name", "")
-            if not name:
-                continue
-                
-            parent_ref = (skill.get("hierarchy") or {}).get("parent")
-            if parent_ref:
-                # Find parent skill by name/alias
-                parent_skill = None
-                parent_name_norm = None
-                
-                # Try to find parent by name or alias
-                for s in self.skills_data:
-                    if s.get("id") == parent_ref:
-                        parent_skill = s
-                        parent_name_norm = self._norm(s.get("name", ""))
-                        break
-                    elif self._norm(s.get("name", "")) == self._norm(parent_ref):
-                        parent_skill = s
-                        parent_name_norm = self._norm(s.get("name", ""))
-                        break
-                    else:
-                        # Check aliases
-                        aliases = s.get("aliases", []) or []
-                        for alias in aliases:
-                            if alias and self._norm(alias) == self._norm(parent_ref):
-                                parent_skill = s
-                                parent_name_norm = self._norm(s.get("name", ""))
-                                break
-                        if parent_skill:
-                            break
-                
-                if parent_skill and parent_name_norm:
-                    child_name_norm = self._norm(name)
-                    
-                    # Set parent relationship for the canonical name
-                    if child_name_norm in hierarchy_lookup:
-                        hierarchy_lookup[child_name_norm]['parent'] = parent_name_norm
-                    
-                    # Set parent relationship for all aliases too
-                    aliases = skill.get("aliases", []) or []
-                    for alias in aliases:
-                        if alias:
-                            alias_norm = self._norm(alias)
-                            if alias_norm in hierarchy_lookup:
-                                hierarchy_lookup[alias_norm]['parent'] = parent_name_norm
-                    
-                    # Add child to parent's children list (use canonical name)
-                    if parent_name_norm in hierarchy_lookup:
-                        if child_name_norm not in hierarchy_lookup[parent_name_norm]['children']:
-                            hierarchy_lookup[parent_name_norm]['children'].append(child_name_norm)
-        
-        return hierarchy_lookup
-
-    def get_skill_path_to_root(self, skill_name: str) -> List[str]:
-        """Get the complete path from skill to root parent"""
+    def get_skill_hierarchy_info(self, skill_name: str) -> Tuple[str, bool, List[str]]:
+        """
+        Returns tuple of (parent_name, is_parent_skill, children_list)
+        """
         skill_lower = self._norm(skill_name)
-        path = []
-        visited = set()
-        current = skill_lower
+        parent_skill = self.child_to_parent_map.get(skill_lower)
+        parent_name = parent_skill.get("name", "") if parent_skill else ""
         
-        while current and current not in visited and current in self.skill_hierarchy_lookup:
-            visited.add(current)
-            # Use canonical name for the path
-            canonical_name = self.skill_hierarchy_lookup[current].get('canonical_name', current)
-            canonical_norm = self._norm(canonical_name)
-            path.append(canonical_norm)
-            
-            parent = self.skill_hierarchy_lookup[current].get('parent')
-            current = parent
-        
-        return path[::-1]  # Reverse to get root-to-skill path
-
-    def build_unified_hierarchy_trees(self, matched_skills: List[str]) -> Tuple[List[HierarchyNode], List[str]]:
-        """Build unified hierarchy trees from matched skills"""
-        if not matched_skills or not self.skill_hierarchy_lookup:
-            return [], matched_skills
-        
-        # Normalize matched skills and map to canonical names
-        normalized_matched = {}
-        canonical_to_original = {}
-        
-        for skill in matched_skills:
-            skill_norm = self._norm(skill)
-            if skill_norm in self.skill_hierarchy_lookup:
-                canonical_name = self.skill_hierarchy_lookup[skill_norm].get('canonical_name', skill)
-                canonical_norm = self._norm(canonical_name)
-                normalized_matched[canonical_norm] = canonical_name
-                # Keep track of original skill name for display
-                if canonical_norm not in canonical_to_original:
-                    canonical_to_original[canonical_norm] = []
-                canonical_to_original[canonical_norm].append(skill)
-        
-        # Find all paths to roots for matched skills
-        all_nodes_in_paths = set()
-        skill_paths = {}
-        
-        for skill in matched_skills:
-            path = self.get_skill_path_to_root(skill)
-            if path:
-                canonical_norm = self._norm(path[-1])  # Last item is the skill itself
-                skill_paths[canonical_norm] = path
-                all_nodes_in_paths.update(path)
-        
-        # Identify root nodes (nodes that appear in paths but have no parents in our matched set)
-        root_candidates = set()
-        for skill_norm in all_nodes_in_paths:
-            if skill_norm in self.skill_hierarchy_lookup:
-                parent = self.skill_hierarchy_lookup[skill_norm].get('parent')
-                if not parent or parent not in all_nodes_in_paths:
-                    root_candidates.add(skill_norm)
-        
-        # Build trees from each root
-        trees = []
-        processed_skills = set()
-        
-        for root_norm in root_candidates:
-            if root_norm in processed_skills:
-                continue
-                
-            root_node = self._build_tree_recursive(
-                root_norm, all_nodes_in_paths, normalized_matched, processed_skills
-            )
-            if root_node:
-                trees.append(root_node)
-        
-        # Find standalone skills (skills not in any hierarchy)
-        standalone = []
-        for skill in matched_skills:
-            skill_norm = self._norm(skill)
-            canonical_name = ""
-            if skill_norm in self.skill_hierarchy_lookup:
-                canonical_name = self.skill_hierarchy_lookup[skill_norm].get('canonical_name', skill)
-            canonical_norm = self._norm(canonical_name) if canonical_name else skill_norm
-            
-            if canonical_norm not in all_nodes_in_paths:
-                standalone.append(skill)
-        
-        return trees, standalone
-
-    def _build_tree_recursive(self, skill_norm: str, nodes_in_paths: Set[str], 
-                             normalized_matched: Dict[str, str], processed_skills: Set[str]) -> HierarchyNode:
-        """Recursively build a hierarchy tree"""
-        if skill_norm in processed_skills or skill_norm not in self.skill_hierarchy_lookup:
-            return None
-        
-        processed_skills.add(skill_norm)
-        
-        # Get skill information
-        skill_info = self.skill_hierarchy_lookup[skill_norm]
-        skill_name = skill_info.get('canonical_name', skill_norm)
-        
-        # Check if this skill is matched (check both canonical name and original skill)
-        is_matched = skill_norm in normalized_matched
-        
-        # Build children
+        # Check if this skill is itself a parent
+        is_parent = False
         children = []
-        child_skill_norms = skill_info.get('children', [])
+        for skill_data in self.skills_data:
+            if self._norm(skill_data.get("name", "")) == skill_lower:
+                hierarchy = skill_data.get("hierarchy", {})
+                children = hierarchy.get("children", [])
+                is_parent = len(children) > 0
+                break
         
-        for child_norm in child_skill_norms:
-            if child_norm in nodes_in_paths and child_norm not in processed_skills:
-                child_node = self._build_tree_recursive(
-                    child_norm, nodes_in_paths, normalized_matched, processed_skills
-                )
-                if child_node:
-                    children.append(child_node)
-        
-        return HierarchyNode(
-            skill_name=skill_name,
-            children=children,
-            is_matched=is_matched
-        )
+        return parent_name, is_parent, children
 
     def create_category_skill_matches(self, matched_skills_by_category: Dict[str, List[str]]) -> List[CategorySkillMatch]:
-        """Convert category-based matched skills to CategorySkillMatch objects with unified hierarchy trees."""
+        """
+        Convert category-based matched skills to CategorySkillMatch objects with proper hierarchy grouping
+        """
         category_matches = []
         
         for category_name, matched_skills in matched_skills_by_category.items():
             if not matched_skills:
                 continue
+                
+            parent_skill_groups = {}  # parent_name -> list of children
+            standalone_skills = []
+            processed_skills = set()
             
-            # Build unified hierarchy trees
-            hierarchy_trees, standalone_skills = self.build_unified_hierarchy_trees(matched_skills)
+            # First pass: identify all parent skills that have matched children
+            for skill_name in matched_skills:
+                if skill_name in processed_skills:
+                    continue
+                    
+                parent_name, is_parent, children = self.get_skill_hierarchy_info(skill_name)
+                
+                # If this skill has a parent, group it under the parent
+                if parent_name:
+                    if parent_name not in parent_skill_groups:
+                        parent_skill_groups[parent_name] = []
+                    parent_skill_groups[parent_name].append(skill_name)
+                    processed_skills.add(skill_name)
+                # If this skill is a parent itself, check for children in matched skills
+                elif is_parent:
+                    children_in_matched = [child for child in children if child in matched_skills]
+                    if children_in_matched:
+                        # Parent with matched children
+                        parent_skill_groups[skill_name] = children_in_matched
+                        processed_skills.add(skill_name)
+                        for child in children_in_matched:
+                            processed_skills.add(child)
+                    else:
+                        # Parent without matched children - treat as standalone
+                        standalone_skills.append(skill_name)
+                        processed_skills.add(skill_name)
+                else:
+                    # Standalone skill (no parent, not a parent)
+                    standalone_skills.append(skill_name)
+                    processed_skills.add(skill_name)
+            
+            # Second pass: handle any remaining skills that weren't processed
+            for skill_name in matched_skills:
+                if skill_name not in processed_skills:
+                    standalone_skills.append(skill_name)
             
             category_match = CategorySkillMatch(
                 category_name=category_name,
-                hierarchy_trees=hierarchy_trees,
+                parent_skill_groups=parent_skill_groups,
                 standalone_skills=standalone_skills
             )
             
@@ -502,7 +310,9 @@ class SimplifiedInternshipMatcher:
         return " | ".join(display_parts)
 
     def normalize_skills(self, skills: List[str]) -> List[str]:
-        """Utilize the skill taxonomy for normalization"""
+        """
+        FIXED: Now properly utilizes the skill taxonomy for normalization
+        """
         normalized = set()
         for skill in skills or []:
             s = (skill or '').lower().strip()
@@ -522,7 +332,10 @@ class SimplifiedInternshipMatcher:
         return list(normalized)
 
     def find_original_skill_name(self, normalized_skill: str, student_skills: List[str]) -> str:
-        """Find the original skill name from student's profile that matches the normalized skill."""
+        """
+        Find the original skill name from student's profile that matches the normalized skill.
+        This helps preserve the original skill names for display purposes.
+        """
         norm_lower = normalized_skill.lower()
         
         # First, check if any student skill normalizes to this skill
@@ -546,14 +359,24 @@ class SimplifiedInternshipMatcher:
         use_llm: bool = False,
         openai_api_key: str = None
     ) -> Tuple[float, List[str], List[str], List[str]]:
-        """Enhanced skill matching that can use LLM for semantic understanding"""
+        """
+        Enhanced skill matching that can use LLM for semantic understanding
+        Returns: (match_score, actual_student_matched_skills, missing_required_skills, llm_matched_skills)
+        """
         # Keep original student skills for display
         student_skills_lower = [s.lower().strip() for s in student_skills if s.strip()]
         required_skills_lower = [s.lower().strip() for s in required_skills if s.strip()]
         
-        # Normalize for matching logic
+        # Normalize for matching logic - NOW PROPERLY USES TAXONOMY
         student_norm = set(self.normalize_skills(student_skills))
         required_norm = set(self.normalize_skills(required_skills))
+        
+        # Debug print to help identify issues
+        print(f"DEBUG: Student skills: {student_skills}")
+        print(f"DEBUG: Student normalized: {student_norm}")
+        print(f"DEBUG: Required skills: {required_skills}")
+        print(f"DEBUG: Required normalized: {required_norm}")
+        print(f"DEBUG: Intersection: {student_norm.intersection(required_norm)}")
         
         # Find actual student skills that match (preserve original names where possible)
         actual_matched = []
@@ -653,7 +476,10 @@ class SimplifiedInternshipMatcher:
         use_llm: bool = False,
         openai_api_key: str = None
     ) -> Tuple[bool, float, Dict[str, Dict[str, Any]], Dict[str, List[str]], List[str]]:
-        """Enhanced technical stack checking with categorized skill matching"""
+        """
+        Enhanced technical stack checking with categorized skill matching
+        Returns matched_skills_by_category instead of flat skill list
+        """
         details = {}
         matched_skills_by_category = {}
         all_missing = []
@@ -694,8 +520,8 @@ class SimplifiedInternshipMatcher:
             details[category] = {
                 "required": options,
                 "min_match": min_match,
-                "matched": all_category_matches,
-                "missing": missing_reqs,
+                "matched": all_category_matches,  # Show actual student skills, not normalized
+                "missing": missing_reqs,  # Show missing requirements, not expanded
                 "mandatory": mandatory,
                 "met": met,
                 "llm_enhanced": use_llm and openai_api_key is not None and len(llm_matched) > 0
@@ -741,13 +567,13 @@ class SimplifiedInternshipMatcher:
         
         # Determine scoring logic used
         if len(internship_req.relevant_degrees) == 0:
-            final_score = (stack_score * 0.6) + (1.0 * 0.4)
+            final_score = (stack_score * 0.6) + (1.0 * 0.4)  # No degree requirements
             scoring_note = "No specific degree requirements"
         elif education_score == 0:
-            final_score = (stack_score * 0.8) + (education_score * 0.2)
+            final_score = (stack_score * 0.8) + (education_score * 0.2)  # Adjusted weights
             scoring_note = "Adjusted scoring due to education mismatch"
         else:
-            final_score = (stack_score * 0.6) + (education_score * 0.4)
+            final_score = (stack_score * 0.6) + (education_score * 0.4)  # Normal scoring
             scoring_note = "Standard scoring"
         
         if final_score >= 0.8:
@@ -775,6 +601,7 @@ class SimplifiedInternshipMatcher:
         elif education_score == 0:
             if len(internship_req.relevant_degrees) > 0:
                 gaps.append("educational alignment")
+            # Don't mention education gap if no requirements specified
         elif education_score < 0.5:
             gaps.append("educational alignment")
         
@@ -801,18 +628,22 @@ class SimplifiedInternshipMatcher:
 
         # 3) Adjusted scoring logic to handle zero education score better
         if len(internship_req.relevant_degrees) == 0:
+            # No specific degree requirements - give full education credit
             education_score = 1.0
             overall_score = (stack_cov * 0.6) + (education_score * 0.4)
         elif education_score == 0:
+            # Has degree requirements but no match - reduce education weight, increase stack weight
+            # This prevents complete failure when technical skills are strong
             overall_score = (stack_cov * 0.8) + (education_score * 0.2)
         else:
+            # Normal case with some education match
             overall_score = (stack_cov * 0.6) + (education_score * 0.4)
 
         reasoning = self.generate_overall_reasoning(
             student, internship_req, stack_pass, stack_cov, education_score, stack_details
         )
 
-        # Convert to CategorySkillMatch objects with unified hierarchy
+        # Convert to CategorySkillMatch objects
         category_skill_matches = self.create_category_skill_matches(matched_skills_by_category)
 
         return MatchResult(
@@ -827,7 +658,7 @@ class SimplifiedInternshipMatcher:
             stack_details=stack_details
         )
 
-# ---- CSV Parser Functions ----
+# ---- CSV Parser ----
 def extract_text_from_html(html_str):
     if not html_str or not isinstance(html_str, str):
         return ""
@@ -877,115 +708,6 @@ def build_child_to_parent(skills: List[dict]) -> Dict[str, dict]:
                 child_to_parent[_norm(a)] = parent
 
     return child_to_parent
-
-def render_tree_structure(node, depth: int = 0, is_last: bool = True, prefix: str = "") -> str:
-    """Render a tree structure with proper indentation and tree characters"""
-    result = ""
-    
-    # Determine the connector for this node
-    if depth == 0:
-        connector = ""
-    else:
-        connector = "└── " if is_last else "├── "
-    
-    # Format the skill name (bold if matched)
-    skill_display = f"**{node.skill_name}**" if node.is_matched else node.skill_name
-    
-    # Add this node to the result
-    result += f"{prefix}{connector}{skill_display}\n"
-    
-    # Prepare prefix for children
-    if depth == 0:
-        child_prefix = ""
-    else:
-        child_prefix = prefix + ("    " if is_last else "│   ")
-    
-    # Add children
-    for i, child in enumerate(node.children):
-        is_last_child = (i == len(node.children) - 1)
-        result += render_tree_structure(child, depth + 1, is_last_child, child_prefix)
-    
-    return result
-
-def render_tree_structure_enhanced(node, depth: int = 0, is_last: bool = True, prefix: str = "") -> str:
-    """Render an enhanced tree structure with HTML styling"""
-    import html
-    
-    # Determine the connector and styling for this node
-    if depth == 0:
-        connector = ""
-        icon = "🌳"
-    else:
-        connector = "└── " if is_last else "├── "
-        icon = "🌿" if node.is_matched else "🍃"
-    
-    # Escape skill name for HTML safety
-    escaped_skill_name = html.escape(str(node.skill_name))
-    
-    # Choose styling based on whether skill is matched
-    if node.is_matched:
-        skill_display = f'''
-        <span style="
-            color: #2e7d32;
-            font-weight: 600;
-            background-color: #e8f5e8;
-            padding: 2px 6px;
-            border-radius: 4px;
-            border: 1px solid #4caf50;
-        ">
-            {icon} {escaped_skill_name}
-        </span>
-        '''
-    else:
-        skill_display = f'''
-        <span style="
-            color: #616161;
-            font-weight: 400;
-        ">
-            {icon} {escaped_skill_name}
-        </span>
-        '''
-    
-    # Create the tree connector with proper spacing
-    if depth == 0:
-        line = f'<div style="margin: 4px 0; line-height: 1.6;">{skill_display}</div>'
-    else:
-        # Use proper HTML entities for tree connectors
-        tree_prefix = prefix.replace("│", "│").replace("└", "└").replace("├", "├")
-        tree_connector = f'<span style="font-family: \'Courier New\', monospace; color: #757575; white-space: pre;">{tree_prefix}{connector}</span>'
-        line = f'<div style="margin: 2px 0; line-height: 1.6;">{tree_connector}{skill_display}</div>'
-    
-    # Start building result
-    result = line
-    
-    # Prepare prefix for children
-    if depth == 0:
-        child_prefix = ""
-    else:
-        child_prefix = prefix + ("    " if is_last else "│   ")
-    
-    # Add children
-    for i, child in enumerate(node.children):
-        is_last_child = (i == len(node.children) - 1)
-        result += render_tree_structure_enhanced(child, depth + 1, is_last_child, child_prefix)
-    
-    # Only wrap the root level with the container
-    if depth == 0:
-        return f'''
-        <div style="
-            font-family: 'Courier New', monospace; 
-            background-color: #fafafa; 
-            padding: 12px; 
-            border-radius: 6px; 
-            border-left: 3px solid #4caf50; 
-            margin: 8px 0;
-            font-size: 14px;
-        ">
-            {result}
-        </div>
-        '''
-    else:
-        return result
 
 def parent_names_for_children(
     skills_json_path: str,
@@ -1076,7 +798,7 @@ def parse_student_csv(file_obj):
 
 # ---- Streamlit App ----
 st.set_page_config(page_title="Enhanced Student-Job Matcher", layout="wide")
-st.title("🎓 Enhanced Student-Job Matching with Unified Hierarchy Display")
+st.title("🎓 Enhanced Student-Job Matching (Fixed Skill Alias Matching)")
 
 # Sidebar - CSV Upload
 st.sidebar.header("Step 1: Upload Student CSV")
@@ -1560,7 +1282,7 @@ ready_to_run = (
 )
 
 if ready_to_run:
-    st.header("Matching Results with Unified Hierarchy Display")
+    st.header("Matching Results (Fixed Skill Alias Matching)")
 
     # Use cached compute when available
     if st.session_state["simp_matrix_rows"] is None or st.session_state["simp_all_matches"] is None:
@@ -1588,10 +1310,10 @@ if ready_to_run:
                     unmet_cats = [c for c, d in result.stack_details.items() if not d.get("met")]
                     row[f"{role.job_title} - Unmet Stack Categories"] = ", ".join(unmet_cats) if unmet_cats else ""
 
-                    # Format matched skills with unified hierarchy display
+                    # Format matched skills with categorized hierarchy
                     matched_skills_display = matcher.format_categorized_skills_display(result.matched_skills_by_category)
                     row[f"{role.job_title} - Matched Skills"] = matched_skills_display
-                    row[f"{role.job_title} - Missing Skills"] = ", ".join(result.missing_skills[:10])
+                    row[f"{role.job_title} - Missing Skills"] = ", ".join(result.missing_skills[:10])  # Limit display
                     row[f"{role.job_title} - Reasoning"] = result.overall_reasoning
 
                     processed += 1
@@ -1664,123 +1386,31 @@ if ready_to_run:
             with c2: st.metric("Stack Coverage", f"{result.stack_coverage_score:.3f}")
             with c3: st.metric("Education Match", f"{result.education_match_score:.3f}")
 
-            # Enhanced unified hierarchy display
-            st.write("**🌳 Matched Skills with Unified Hierarchy Trees:**")
+            # Enhanced categorized skills display with hierarchy
+            st.write("**🎯 Matched Skills by Category with Hierarchy:**")
             if result.matched_skills_by_category:
                 for category_match in result.matched_skills_by_category:
                     st.success(f"**📂 {category_match.category_name}:** {category_match.get_display_string()}")
                 
-                # Show detailed unified hierarchy breakdown
-                with st.expander("🌳 Detailed Unified Hierarchy Trees", expanded=True):
+                # Show detailed hierarchy breakdown
+                with st.expander("📊 Detailed Category & Skill Hierarchy Breakdown"):
                     for category_match in result.matched_skills_by_category:
-                        # Create a styled container for each category
-                        with st.container():
-                            # Category header with colored background
-                            st.markdown(f"""
-                            <div style="
-                                background: linear-gradient(90deg, #f0f2f6 0%, #ffffff 100%);
-                                padding: 12px 16px;
-                                border-radius: 8px;
-                                border-left: 4px solid #1f77b4;
-                                margin: 8px 0;
-                            ">
-                                <h4 style="margin: 0; color: #1f77b4;">
-                                    📂 {category_match.category_name}
-                                </h4>
-                            </div>
-                            """, unsafe_allow_html=True)
-                            
-                            # Debug information (collapsed by default)
-                            # with st.expander(f"🔍 Debug Info for {category_match.category_name}", expanded=False):
-                            #     # Get the original matched skills from stack details
-                            #     category_matched_skills = []
-                            #     for cat, details in result.stack_details.items():
-                            #         if cat == category_match.category_name:
-                            #             category_matched_skills = details.get('matched', [])
-                            #             break
-                                
-                                # st.write("**Debug - Matched Skills:**", category_matched_skills)
-                                
-                                # Show hierarchy lookup for matched skills
-                                # for skill in category_matched_skills:
-                                #     skill_norm = matcher._norm(skill)
-                                #     if skill_norm in matcher.skill_hierarchy_lookup:
-                                #         lookup_info = matcher.skill_hierarchy_lookup[skill_norm]
-                                #         st.write(f"- {skill} ({skill_norm}): parent={lookup_info.get('parent')}, canonical={lookup_info.get('canonical_name')}")
-                                #     else:
-                                #         st.write(f"- {skill} ({skill_norm}): NOT FOUND in hierarchy lookup")
-                            
-                            # Display unified hierarchy trees with enhanced styling
-                            if category_match.hierarchy_trees:
-                                st.markdown("### 🌳 Skill Hierarchy")
-                                
-                                # Create columns for better layout if multiple trees
-                                if len(category_match.hierarchy_trees) > 1:
-                                    cols = st.columns(min(len(category_match.hierarchy_trees), 3))
-                                    for tree_idx, tree in enumerate(category_match.hierarchy_trees):
-                                        with cols[tree_idx % 3]:
-                                            st.markdown(f"""
-                                            <div style="
-                                                background-color: #f8f9fa;
-                                                padding: 16px;
-                                                border-radius: 8px;
-                                                border: 1px solid #e9ecef;
-                                                margin: 8px 0;
-                                            ">
-                                                <h5 style="color: #495057; margin-bottom: 12px;">
-                                                    🌲 Tree {tree_idx + 1}
-                                                </h5>
-                                            </div>
-                                            """, unsafe_allow_html=True)
-                                            
-                                            tree_display = render_tree_structure_enhanced(tree)
-                                            st.markdown(tree_display, unsafe_allow_html=True)
-                                else:
-                                    # Single tree - full width
-                                    for tree_idx, tree in enumerate(category_match.hierarchy_trees):
-                                        tree_display = render_tree_structure_enhanced(tree)
-                                        st.markdown(tree_display, unsafe_allow_html=True)
-                            
-                            # Display standalone skills with better styling
-                            if category_match.standalone_skills:
-                                st.markdown("### ⭐ Independent Skills")
-                                
-                                # Create skill badges
-                                skill_badges_html = ""
-                                for skill in category_match.standalone_skills:
-                                    # Escape any HTML characters in skill names
-                                    import html
-                                    escaped_skill = html.escape(skill)
-                                    skill_badges_html += f"""
-                                    <span style="
-                                        background-color: #e3f2fd;
-                                        color: #1976d2;
-                                        padding: 6px 12px;
-                                        border-radius: 16px;
-                                        font-size: 14px;
-                                        font-weight: 500;
-                                        margin: 4px;
-                                        display: inline-block;
-                                        border: 1px solid #bbdefb;
-                                    ">
-                                        {escaped_skill}
-                                    </span>
-                                    """
-                                
-                                st.markdown(f"""
-                                <div style="
-                                    background-color: #fafafa;
-                                    padding: 16px;
-                                    border-radius: 8px;
-                                    border: 1px solid #e0e0e0;
-                                    margin: 8px 0;
-                                ">
-                                    {skill_badges_html}
-                                </div>
-                                """, unsafe_allow_html=True)
-                            
-                            # Add separator between categories
-                            st.markdown("<hr style='margin: 24px 0; border: 1px solid #e9ecef;'>", unsafe_allow_html=True)
+                        st.write(f"**📂 Category: {category_match.category_name}**")
+                        
+                        # Show parent-child groups
+                        for parent, children in category_match.parent_skill_groups.items():
+                            if len(children) == 1 and children[0].lower() == parent.lower():
+                                st.write(f"   ⭐ **Parent Skill:** {parent}")
+                            else:
+                                st.write(f"   🌳 **Parent Skill:** {parent}")
+                                for child in children:
+                                    st.write(f"      └── 🌱 Child: {child}")
+                        
+                        # Show standalone skills
+                        for skill in category_match.standalone_skills:
+                            st.write(f"   ⭐ **Standalone Skill:** {skill}")
+                        
+                        st.write("")  # Empty line for separation
             else:
                 st.warning("No skills matched for this role.")
 
@@ -1804,7 +1434,7 @@ if ready_to_run:
     st.download_button(
         label="📊 Download Results as CSV",
         data=csv_content,
-        file_name=f"unified_hierarchy_student_job_matching_{time.strftime('%Y%m%d_%H%M%S')}.csv",
+        file_name=f"fixed_student_job_matching_{time.strftime('%Y%m%d_%H%M%S')}.csv",
         mime="text/csv"
     )
 
@@ -1822,12 +1452,12 @@ st.sidebar.header("🔍 Debug Information")
 if st.sidebar.checkbox("Show Debug Info"):
     if students:
         st.write("**Sample Student Skills:**")
-        for student in students[:2]:
+        for student in students[:2]:  # Show first 2 students
             st.write(f"- {student.name}: {student.skills}")
     
     if job_roles:
         st.write("**Job Requirements:**")
-        for role in job_roles[:2]:
+        for role in job_roles[:2]:  # Show first 2 roles
             st.write(f"- {role.job_title}: {role.technical_stack}")
     
     # Show skill taxonomy info
@@ -1838,53 +1468,48 @@ if st.sidebar.checkbox("Show Debug Info"):
         for orig, canonical in sample_mappings:
             st.write(f"- '{orig}' → '{canonical}'")
 
-# Instructions with unified hierarchy features highlighted
-with st.expander("📋 Instructions & New Unified Hierarchy Features"):
+# Instructions with fixes highlighted
+with st.expander("📋 Instructions & Key Fixes"):
     st.markdown("""
-    **🌳 NEW: UNIFIED HIERARCHY TREE DISPLAY**
+    **🔧 KEY FIXES IMPLEMENTED:**
     
-    **What's New:**
-    - **Unified Trees**: Instead of showing separate hierarchies for each matched skill, the system now builds complete hierarchy trees
-    - **Example**: If you have JavaScript → Node.js → Express.js, and the student matches both "node.js" and "express.js", 
-      it will show: **JavaScript** (**Node.js** → **Express.js**) as one unified tree
-    - **Smart Tree Building**: Automatically identifies root nodes and builds complete trees showing all relationships
-    - **Visual Tree Display**: In the detailed breakdown, see beautiful ASCII tree structures showing the complete hierarchy
+    1. **Fixed Skill Taxonomy Loading**: Now properly loads and utilizes the skill taxonomy JSON file
+    2. **Enhanced Alias Matching**: The `build_skill_normalization_maps()` method now correctly maps all aliases to canonical skill names
+    3. **Improved Normalization**: The `normalize_skills()` method now uses the taxonomy for accurate skill matching
+    4. **Better Debug Output**: Added debug prints and information to help identify matching issues
+    5. **Preserved Original Names**: Skills are matched using normalized forms but displayed using original student skill names
     
-    **Key Benefits:**
-    1. **Complete Context**: See the full skill hierarchy tree, not just individual matches
-    2. **Better Understanding**: Understand how matched skills relate to each other
-    3. **Cleaner Display**: Avoid duplicate parent skill entries across different children
-    4. **Professional Presentation**: Perfect for reports and stakeholder presentations
+    **Example Fix**: If your taxonomy has:
+    ```json
+    {
+        "name": "React",
+        "aliases": ["React.js", "ReactJS", "react.js"]
+    }
+    ```
     
-    **Example Scenarios:**
+    Now when a student has "React.js" and job requires "react", they will match correctly!
     
-    **Scenario 1: Web Development Stack**
-    - Student has: "react", "nodejs", "express"
-    - Old way: Would show React separately, Node.js separately, Express separately
-    - New way: Shows **JavaScript** (**React**, **Node.js** → **Express**) as unified trees
+    **Required CSV Columns for Students:**
+    - `StudentName` or `name`
+    - `Email Address` or `email`  
+    - `education`
+    - `degree`
+    - `skill` (Python list)
+    - `projects` (list of dicts with 'name' and 'description')
+    - `experience` (list of dicts with 'company', 'role', 'details')
+    - `achievements` (optional list)
+    - `extracurricular` (optional list)
+
+    **Enhanced Debugging Features:**
+    - Enable "Show Debug Info" in the sidebar to see skill normalization mappings
+    - Debug prints show skill matching process in console
+    - Sample skill taxonomy mappings displayed
     
-    **Scenario 2: Database Skills**
-    - Student has: "mysql", "postgresql", "sql"
-    - Old way: Three separate database entries
-    - New way: **Database** (**SQL** → **MySQL**, **PostgreSQL**) showing the relationship
-    
-    **Technical Implementation:**
-    - `build_unified_hierarchy_trees()`: Builds complete trees from matched skills
-    - `HierarchyNode`: Represents nodes in the hierarchy with children and match status
-    - `render_tree_structure()`: Creates beautiful ASCII tree visualizations
-    - Smart root detection: Automatically finds tree roots even for partial matches
-    
-    **How to Use:**
-    1. Upload your student CSV with skills
-    2. Define job roles with technical stack requirements
-    3. Run evaluation to see unified hierarchy trees
-    4. Check the "Detailed Unified Hierarchy Trees" expander for complete tree visualizations
-    
-    **CSV Format remains the same:**
-    - Required columns: StudentName, Email, education, degree, skill, projects, experience
-    - The skill column should contain a Python list of skills
-    - Parent skills are automatically added from the taxonomy
+    **Testing the Fix:**
+    1. Upload your student CSV with "React.js" skills
+    2. Create a job role requiring "react"
+    3. Run evaluation - they should now match!
     """)
 
 st.markdown("---")
-st.caption("Enhanced Student-Job Matcher with Unified Hierarchy Tree Display 🌳 🚀")
+st.caption("Enhanced Student-Job Matcher with FIXED Skill Alias Matching 🚀 🔧 ✅")
